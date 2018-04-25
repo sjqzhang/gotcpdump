@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/gopacket"
@@ -20,8 +21,12 @@ var (
 	device   = flag.String("i", "any", "device interface")
 	filter   = flag.String("f", "", "filter")
 	snapshot = flag.Int("s", 1024, "snapshot length")
+	timeout  = flag.Int("t", -1, "timeout")
+	ex_port  = flag.String("e", "", "exclude port")
 
 	errorLog = log.New(os.Stderr, "", 0)
+
+	chan_timeout = make(chan bool, 1)
 )
 
 type Event struct {
@@ -39,6 +44,13 @@ type Event struct {
 }
 
 func process(p gopacket.Packet) {
+
+	defer func() {
+		if err := recover(); err != nil {
+
+		}
+	}()
+
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = ""
@@ -66,6 +78,16 @@ func process(p gopacket.Packet) {
 		SrcPort: srcPort.String(),
 		DstPort: dstPort.String(),
 	}
+
+	ports := strings.Split(*ex_port, ",")
+
+	for p, _ := range ports {
+		if p == srcPort.String() || p == dstPort.String() {
+			return
+		}
+
+	}
+
 	json_event, err := json.Marshal(e)
 	if err != nil {
 		errorLog.Printf("ERROR: can't marshal %s", e)
@@ -96,11 +118,31 @@ func main() {
 		log.Fatal(err)
 	}
 
-	errorLog.Printf("Started capture: device=%s filter=\"%s\"\n", *device, *filter)
+	//	errorLog.Printf("Started capture: device=%s filter=\"%s\"\n", *device, *filter)
 	// capture packets forever
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	for packet := range packetSource.Packets() {
-		process(packet)
+	//	fmt.Println(*timeout)
+	//	os.Exit(1)
+	if *timeout != -1 {
+		go func() {
+			time.Sleep(time.Millisecond * time.Duration(*timeout))
+			chan_timeout <- true
+
+		}()
+	}
+	go func() {
+		for packet := range packetSource.Packets() {
+			if packet != nil {
+				process(packet)
+
+			}
+		}
+	}()
+
+	select {
+	case <-chan_timeout:
+		os.Exit(0)
+
 	}
 
 }

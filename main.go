@@ -26,7 +26,7 @@ var (
 	timeout      = flag.Int("t", -1, "timeout exit application")
 	ex_port      = flag.String("e", "", "exclude port")
 	url          = flag.String("u", "", "server url")
-	capture_time = flag.String("interval", "", "capture time,sleep time")
+	capture_time = flag.String("interval", "30,30", "capture time,sleep time")
 	quiet        = flag.Bool("q", false, "quiet")
 
 	errorLog = log.New(os.Stderr, "", 0)
@@ -164,10 +164,10 @@ func main() {
 			if t < c {
 				sleepFlag = false
 			}
-			if t > c {
+			if t >= c {
 				sleepFlag = true
 			}
-			if t >= a {
+			if t > a {
 				t = 0
 				sleepFlag = false
 			}

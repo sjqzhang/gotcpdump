@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,10 +11,15 @@ import (
 	"github.com/google/gopacket/pcap"
 	"log"
 	"math/rand"
+	"net"
 	"os"
+	"os/exec"
+	"regexp"
 	"strconv"
+	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -34,6 +41,8 @@ var (
 	chan_timeout          = make(chan bool, 1)
 	packetCounter int     = 0
 	ratioPercent  float32 = 0.1
+	localIp       string
+	ports      []string
 )
 
 type CommonMap struct {
@@ -199,6 +208,20 @@ type EventList struct {
 var eventList EventList
 var evenMap *CommonMap
 
+func GetPulicIP() string {
+	var (
+		err  error
+		conn net.Conn
+	)
+	if conn, err = net.Dial("udp", "8.8.8.8:80"); err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().String()
+	idx := strings.LastIndex(localAddr, ":")
+	return localAddr[0:idx]
+}
+
 func process(p gopacket.Packet) {
 
 	defer func() {
@@ -221,6 +244,14 @@ func process(p gopacket.Packet) {
 	srcPort, dstPort := p.TransportLayer().TransportFlow().Endpoints()
 	l4Type := p.TransportLayer().LayerType()
 
+	if localIp != dstIP.String() {
+		return
+	}
+
+	if !Contains(dstIP.String(),ports) {
+		return
+	}
+
 	e := Event{
 		Hostname:  hostname,
 		Timestamp: timestamp,
@@ -234,6 +265,8 @@ func process(p gopacket.Packet) {
 		SrcPort: srcPort.String(),
 		DstPort: dstPort.String(),
 	}
+
+	fmt.Println(json.Marshal(e))
 
 	key := fmt.Sprintf("%s->s%", srcIP, dstIP)
 
@@ -271,6 +304,80 @@ func process(p gopacket.Packet) {
 	//}
 	//
 	//return
+}
+
+func Exec(cmd []string, timeout int) (string, string, int) {
+
+	var out bytes.Buffer
+
+	duration := time.Duration(timeout) * time.Second
+	ctx, _ := context.WithTimeout(context.Background(), duration)
+
+	var path string
+
+	var command *exec.Cmd
+	command = exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+
+	command.Stdin = os.Stdin
+	command.Stdout = &out
+	command.Stderr = &out
+
+	err := command.Run()
+
+	RemoveFile := func() {
+		if path != "" {
+			os.Remove(path)
+		}
+	}
+
+	defer RemoveFile()
+
+	status := command.ProcessState.Sys().(syscall.WaitStatus).ExitStatus()
+
+	if err != nil {
+		log.Println(err, cmd)
+		return "", err.Error(), -1
+	}
+
+	return out.String(), "", status
+
+}
+
+func  Contains(obj interface{}, arrayobj interface{}) bool {
+	targetValue := reflect.ValueOf(arrayobj)
+	switch reflect.TypeOf(arrayobj).Kind() {
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < targetValue.Len(); i++ {
+			if targetValue.Index(i).Interface() == obj {
+				return true
+			}
+		}
+	case reflect.Map:
+		if targetValue.MapIndex(reflect.ValueOf(obj)).IsValid() {
+			return true
+		}
+	}
+	return false
+}
+
+func get_listen_ports() []string {
+	var (
+		err     error
+		exp     *regexp.Regexp
+		content string
+		ports   []string
+	)
+	content, _, _ = Exec([]string{"ss", "-ntl"}, 5)
+	exp, err = regexp.Compile(":\\d{2,}")
+	if err != nil {
+		log.Println(err)
+	}
+	ports = exp.FindAllString(content, -1)
+	for i, p := range ports {
+		ports[i] =strings.TrimSpace( strings.Split(p, ":")[1])
+	}
+	return ports
+
 }
 
 func capture_by_time(packetSource *gopacket.PacketSource) {
@@ -340,7 +447,10 @@ func capture_by_time(packetSource *gopacket.PacketSource) {
 }
 
 func capture_by_ratio(packetSource *gopacket.PacketSource) {
-
+	defer func() {
+		if re := recover(); re != nil {
+		}
+	}()
 	rand.Seed(time.Now().UnixNano())
 	for packet := range packetSource.Packets() {
 		if rand.Float32() < ratioPercent {
@@ -355,6 +465,8 @@ func main() {
 	flag.Parse()
 
 	// Open device
+	ports=get_listen_ports()
+	//fmt.Println(ports)
 	handle, err := pcap.OpenLive(
 		*device,
 		int32(*snapshot),
@@ -366,13 +478,15 @@ func main() {
 	}
 	defer handle.Close()
 
+	localIp = GetPulicIP()
+
 	evenMap = NewCommonMap(0)
 
 	tk := time.NewTicker(time.Second)
 
 	go func(tk *time.Ticker) {
 		for _ = range tk.C {
-			fmt.Println(packetCounter, *ratio)
+			//fmt.Println(packetCounter, *ratio)
 			if packetCounter > 10 {
 				*ratio = *ratio - 0.1
 			}
@@ -432,7 +546,16 @@ func main() {
 		return
 	}
 	rand.Seed(time.Now().UnixNano())
-	capture_by_ratio(packetSource)
 	_ = packetSource
+
+	go func() {
+		for{
+			capture_by_ratio(packetSource)
+		}
+	}()
+
+	select {
+
+	}
 
 }

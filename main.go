@@ -1,191 +1,65 @@
 package main
 
 import (
-	"bytes"
-	"context"
+	//"bytes"
+	//"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/astaxie/beego/httplib"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
-	"log"
-	"math/rand"
+	log "github.com/sjqzhang/seelog"
+
+	"github.com/sjqzhang/goutil"
+	_ "net/http/pprof"
+	//"math/rand"
 	"net"
 	"os"
-	"os/exec"
-	"regexp"
+	//"os/exec"
+	//"regexp"
 	"strconv"
-	"reflect"
+	//"reflect"
 	"strings"
 	"sync"
-	"syscall"
+	//"syscall"
 	"time"
+	"net/http"
 )
 
 const (
-	promiscuous = true
+	promiscuous  = true
+	logConfigStr = `
+<seelog type="asynctimer" asyncinterval="1000" minlevel="trace" maxlevel="error">  
+	<outputs formatid="common">  
+		<buffered formatid="common" size="1048576" flushperiod="1000">  
+			<rollingfile type="size" filename="/var/log/pcap.log" maxsize="104857600" maxrolls="10"/>  
+		</buffered>
+	</outputs>  	  
+	 <formats>
+		 <format id="common" format="%Date %Time [%LEV] [%File:%Line] [%Func] %Msg%n" />  
+	 </formats>  
+</seelog>
+`
 )
 
 var (
-	device                = flag.String("i", "any", "device interface")
-	filter                = flag.String("f", "", "filter")
-	snapshot              = flag.Int("s", 1024, "snapshot length")
-	timeout               = flag.Int("t", -1, "timeout exit application")
-	ex_port               = flag.String("e", "", "exclude port")
-	url                   = flag.String("u", "", "server url")
-	capture_time          = flag.String("interval", "30,30", "capture time,sleep time")
-	ratio                 = flag.Float64("r", 1, "capture ratio,default:1   1%")
-	quiet                 = flag.Bool("q", false, "quiet")
-	errorLog              = log.New(os.Stderr, "", 0)
+	device       = flag.String("i", "any", "device interface")
+	filter       = flag.String("f", "", "filter")
+	snapshot     = flag.Int("s", 1024, "snapshot length")
+	timeout      = flag.Int("t", -1, "timeout exit application")
+	ex_port      = flag.String("e", "", "exclude port")
+	url          = flag.String("u", "", "server url")
+	capture_time = flag.String("interval", "30,30", "capture time,sleep time")
+	ratio        = flag.Float64("r", 1, "capture ratio,default:1   1%")
+	quiet        = flag.Bool("q", false, "quiet")
+	//errorLog              = log.New(os.Stderr, "", 0)
 	chan_timeout          = make(chan bool, 1)
 	packetCounter int     = 0
 	ratioPercent  float32 = 0.1
 	localIp       string
-	ports      []string
+	ports         []string
 )
-
-type CommonMap struct {
-	sync.Mutex
-	m map[string]interface{}
-}
-
-func NewCommonMap(size int) *CommonMap {
-	if size > 0 {
-		return &CommonMap{m: make(map[string]interface{}, size)}
-	} else {
-		return &CommonMap{m: make(map[string]interface{})}
-	}
-}
-func (s *CommonMap) GetValue(k string) (interface{}, bool) {
-	s.Lock()
-	defer s.Unlock()
-	v, ok := s.m[k]
-	return v, ok
-}
-func (s *CommonMap) Put(k string, v interface{}) {
-	s.Lock()
-	defer s.Unlock()
-	s.m[k] = v
-}
-func (s *CommonMap) LockKey(k string) {
-	s.Lock()
-	if v, ok := s.m[k]; ok {
-		s.m[k+"_lock_"] = true
-		s.Unlock()
-		v.(*sync.Mutex).Lock()
-	} else {
-		s.m[k] = &sync.Mutex{}
-		v = s.m[k]
-		s.m[k+"_lock_"] = true
-		s.Unlock()
-		v.(*sync.Mutex).Lock()
-	}
-}
-func (s *CommonMap) UnLockKey(k string) {
-	s.Lock()
-	if v, ok := s.m[k]; ok {
-		v.(*sync.Mutex).Unlock()
-		s.m[k+"_lock_"] = false
-	}
-	s.Unlock()
-}
-func (s *CommonMap) IsLock(k string) bool {
-	s.Lock()
-	if v, ok := s.m[k+"_lock_"]; ok {
-		s.Unlock()
-		return v.(bool)
-	}
-	s.Unlock()
-	return false
-}
-func (s *CommonMap) Keys() []string {
-	s.Lock()
-	keys := make([]string, len(s.m))
-	defer s.Unlock()
-	for k, _ := range s.m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-func (s *CommonMap) Clear() {
-	s.Lock()
-	defer s.Unlock()
-	s.m = make(map[string]interface{})
-}
-func (s *CommonMap) Remove(key string) {
-	s.Lock()
-	defer s.Unlock()
-	if _, ok := s.m[key]; ok {
-		delete(s.m, key)
-	}
-}
-func (s *CommonMap) AddUniq(key string) {
-	s.Lock()
-	defer s.Unlock()
-	if _, ok := s.m[key]; !ok {
-		s.m[key] = nil
-	}
-}
-func (s *CommonMap) AddCount(key string, count int) {
-	s.Lock()
-	defer s.Unlock()
-	if _v, ok := s.m[key]; ok {
-		v := _v.(int)
-		v = v + count
-		s.m[key] = v
-	} else {
-		s.m[key] = 1
-	}
-}
-func (s *CommonMap) AddCountInt64(key string, count int64) {
-	s.Lock()
-	defer s.Unlock()
-	if _v, ok := s.m[key]; ok {
-		v := _v.(int64)
-		v = v + count
-		s.m[key] = v
-	} else {
-		s.m[key] = count
-	}
-}
-func (s *CommonMap) Add(key string) {
-	s.Lock()
-	defer s.Unlock()
-	if _v, ok := s.m[key]; ok {
-		v := _v.(int)
-		v = v + 1
-		s.m[key] = v
-	} else {
-		s.m[key] = 1
-	}
-}
-func (s *CommonMap) Zero() {
-	s.Lock()
-	defer s.Unlock()
-	for k := range s.m {
-		s.m[k] = 0
-	}
-}
-func (s *CommonMap) Contains(i ...interface{}) bool {
-	s.Lock()
-	defer s.Unlock()
-	for _, val := range i {
-		if _, ok := s.m[val.(string)]; !ok {
-			return false
-		}
-	}
-	return true
-}
-func (s *CommonMap) Get() map[string]interface{} {
-	s.Lock()
-	defer s.Unlock()
-	m := make(map[string]interface{})
-	for k, v := range s.m {
-		m[k] = v
-	}
-	return m
-}
 
 type Event struct {
 	Hostname  string    `json:"hostname"`
@@ -201,35 +75,175 @@ type Event struct {
 	DstPort string `json:"dst_port"`
 }
 
-type EventList struct {
-	Events []Event `json:"events"`
+type PcapHandler struct {
+	handle       *pcap.Handle
+	filter       string
+	snapshot     int
+	device       string
+	lock         *sync.Mutex
+	isStop       bool
+	quiet        bool
+	capTime      int
+	sleepCapTime int
+	eventList    []Event
+	ports        []string
+	localIp string
+	mayPort  chan int
+	util *goutil.Common
+	url string
 }
 
-var eventList EventList
-var evenMap *CommonMap
-
-func GetPulicIP() string {
+func NewPcapHandler() (*PcapHandler, error) {
 	var (
-		err  error
-		conn net.Conn
+		err          error
+		handle       *pcap.Handle
+		capTime      int
+		sleepCapTime int
 	)
-	if conn, err = net.Dial("udp", "8.8.8.8:80"); err != nil {
-		return "127.0.0.1"
+	handle, err = pcap.OpenLive(
+		*device,
+		int32(*snapshot),
+		promiscuous,
+		pcap.BlockForever,
+	)
+	if err != nil {
+		log.Error(err)
+		panic(err)
 	}
-	defer conn.Close()
-	localAddr := conn.LocalAddr().String()
-	idx := strings.LastIndex(localAddr, ":")
-	return localAddr[0:idx]
+	err = handle.SetBPFFilter(*filter)
+	if err != nil {
+		log.Error(err)
+		panic(err)
+	}
+	intervals := strings.Split(*capture_time, ",")
+	if len(intervals) == 2 {
+		capTime, err = strconv.Atoi(intervals[0])
+		sleepCapTime, err = strconv.Atoi(intervals[0])
+	}
+	util:=&goutil.Common{}
+	return &PcapHandler{
+		handle:       handle,
+		filter:       *filter,
+		snapshot:     *snapshot,
+		device:       *device,
+		lock:         &sync.Mutex{},
+		isStop:       false,
+		capTime:      capTime,
+		sleepCapTime: sleepCapTime,
+		util:util,
+		url:*url,
+		quiet:*quiet,
+		localIp:util.GetPulicIP(),
+	}, err
 }
+func (this *PcapHandler) ScanLocalPort() {
+	ch := make(chan int, 65536)
+	Check := func(ch chan int) {
+		for {
+			port := <-ch
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second*2)
+			if err == nil {
+				this.ports = append(this.ports, fmt.Sprintf("%d",port))
+				conn.Close()
+			}
+		}
+	}
 
-func process(p gopacket.Packet) {
+	for i := 0; i < 50; i++ {
+		go Check(ch)
+	}
 
-	defer func() {
-		if err := recover(); err != nil {
-
+	go func() {
+		for {
+			this.ports = this.ports[0:0]
+			for i := 0; i < 65536; i++ {
+				ch <- i
+			}
+			time.Sleep(time.Hour * 1)
 		}
 	}()
 
+}
+
+func (this *PcapHandler) ReStart() {
+	var (
+		err    error
+		handle *pcap.Handle
+	)
+	if !this.isStop {
+		this.Stop()
+	}
+
+	handle, err = pcap.OpenLive(
+		*device,
+		int32(*snapshot),
+		promiscuous,
+		pcap.BlockForever,
+	)
+	if err != nil {
+		log.Error("ReStart Fail", err)
+		return
+	}
+	this.handle = handle
+	err = handle.SetBPFFilter(*filter)
+	if err != nil {
+		log.Error("SetBPFFilter Fail", err)
+		return
+	}
+	this.isStop = false
+
+}
+
+func (this *PcapHandler) Stop() {
+	this.lock.Lock()
+	defer this.lock.Unlock()
+	if this.handle != nil {
+		this.handle.Close()
+	}
+	this.isStop = true
+
+}
+func (this *PcapHandler) Capture() {
+	packetSource := gopacket.NewPacketSource(this.handle, this.handle.LinkType())
+	capPackage := func(packetSource *gopacket.PacketSource) {
+		defer func() {
+			if re := recover(); re != nil {
+			}
+		}()
+		for packet := range packetSource.Packets() {
+			if this.isStop {
+				break
+			}
+			this.Process(packet)
+		}
+	}
+	go func() {
+		for {
+			if this.isStop {
+				break
+			}
+			capPackage(packetSource)
+		}
+	}()
+}
+func (this *PcapHandler) Send() {
+	if this.url=="" {
+		return
+	}
+	data,err:=json.Marshal(this.eventList)
+	this.eventList=this.eventList[0:0]
+	if err!=nil {
+		log.Error(err)
+		return
+	}
+	req:=httplib.Post(this.url)
+	req.SetTimeout(time.Second*10,time.Second*10)
+	req.Param("data",string(data))
+	req.String()
+
+}
+
+func (this *PcapHandler) Process(p gopacket.Packet) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = ""
@@ -244,318 +258,83 @@ func process(p gopacket.Packet) {
 	srcPort, dstPort := p.TransportLayer().TransportFlow().Endpoints()
 	l4Type := p.TransportLayer().LayerType()
 
-	if localIp != dstIP.String() {
-		return
-	}
-
-	if !Contains(dstIP.String(),ports) {
-		return
-	}
-
 	e := Event{
 		Hostname:  hostname,
 		Timestamp: timestamp,
 		Length:    length,
-
-		Layer3: l3Type.String(),
-		SrcIP:  srcIP.String(),
-		DstIP:  dstIP.String(),
+		Layer3:    l3Type.String(),
+		SrcIP:     srcIP.String(),
+		DstIP:     dstIP.String(),
 
 		Layer4:  l4Type.String(),
 		SrcPort: srcPort.String(),
 		DstPort: dstPort.String(),
 	}
 
-	fmt.Println(json.Marshal(e))
+	if !this.quiet {
+		json_event, _ := json.Marshal(e)
+		fmt.Println(string(json_event))
+	}
 
-	key := fmt.Sprintf("%s->s%", srcIP, dstIP)
+	if (e.DstIP==this.localIp|| e.DstIP=="127.0.0.1" ) && this.util.Contains(e.DstPort,this.ports) {
+			this.eventList = append(this.eventList, e)
+			if len(this.eventList)<10 {
+				return
+			} else {
+				this.Send()
+			}
 
-	if _, ok := evenMap.GetValue(key); ok {
-		return
+	}
+
+}
+
+func init() {
+	// init log
+	if logger, err := log.LoggerFromConfigAsBytes([]byte(logConfigStr)); err != nil {
+		panic(err)
 	} else {
-		evenMap.Put(key, e)
-	}
-
-	ports := strings.Split(*ex_port, ",")
-
-	for _, p := range ports {
-		if p == srcPort.String() || p == dstPort.String() {
-			return
-		}
-
-	}
-
-	//if len(eventList.Events)<5 {
-	//	eventList.Events=append(eventList.Events,e)
-	//	return
-	//}
-	//json_event, err := json.Marshal(eventList)
-	//eventList.Events=eventList.Events[0:0]
-	//if *url != "" {
-	//	req := httplib.Post(*url)
-	//	req.Param("data", string(json_event))
-	//	req.String()
-	//}
-	//if err != nil {
-	//	errorLog.Printf("ERROR: can't marshal %s", e)
-	//}
-	//if !*quiet {
-	//	fmt.Println(string(json_event))
-	//}
-	//
-	//return
-}
-
-func Exec(cmd []string, timeout int) (string, string, int) {
-
-	var out bytes.Buffer
-
-	duration := time.Duration(timeout) * time.Second
-	ctx, _ := context.WithTimeout(context.Background(), duration)
-
-	var path string
-
-	var command *exec.Cmd
-	command = exec.CommandContext(ctx, cmd[0], cmd[1:]...)
-
-	command.Stdin = os.Stdin
-	command.Stdout = &out
-	command.Stderr = &out
-
-	err := command.Run()
-
-	RemoveFile := func() {
-		if path != "" {
-			os.Remove(path)
-		}
-	}
-
-	defer RemoveFile()
-
-	status := command.ProcessState.Sys().(syscall.WaitStatus).ExitStatus()
-
-	if err != nil {
-		log.Println(err, cmd)
-		return "", err.Error(), -1
-	}
-
-	return out.String(), "", status
-
-}
-
-func  Contains(obj interface{}, arrayobj interface{}) bool {
-	targetValue := reflect.ValueOf(arrayobj)
-	switch reflect.TypeOf(arrayobj).Kind() {
-	case reflect.Slice, reflect.Array:
-		for i := 0; i < targetValue.Len(); i++ {
-			if targetValue.Index(i).Interface() == obj {
-				return true
-			}
-		}
-	case reflect.Map:
-		if targetValue.MapIndex(reflect.ValueOf(obj)).IsValid() {
-			return true
-		}
-	}
-	return false
-}
-
-func get_listen_ports() []string {
-	var (
-		err     error
-		exp     *regexp.Regexp
-		content string
-		ports   []string
-	)
-	content, _, _ = Exec([]string{"ss", "-ntl"}, 5)
-	exp, err = regexp.Compile(":\\d{2,}")
-	if err != nil {
-		log.Println(err)
-	}
-	ports = exp.FindAllString(content, -1)
-	for i, p := range ports {
-		ports[i] =strings.TrimSpace( strings.Split(p, ":")[1])
-	}
-	return ports
-
-}
-
-func capture_by_time(packetSource *gopacket.PacketSource) {
-
-	if *timeout != -1 {
-		go func() {
-			time.Sleep(time.Second * time.Duration(*timeout))
-			chan_timeout <- true
-
-		}()
-	}
-
-	sleepTime := -1
-	captrueTime := -1
-	sleepFlag := false
-
-	if *capture_time != "" {
-		ts := strings.Split(*capture_time, ",")
-		if len(ts) == 2 {
-			captrueTime, _ = strconv.Atoi(ts[0])
-			sleepTime, _ = strconv.Atoi(ts[1])
-		}
-	}
-
-	go func() {
-		c := captrueTime
-		s := sleepTime
-		a := c + s
-		t := 0
-		for {
-
-			if t < c {
-				sleepFlag = false
-			}
-			if t >= c {
-				sleepFlag = true
-			}
-			if t > a {
-				t = 0
-				sleepFlag = false
-			}
-			time.Sleep(time.Duration(1) * time.Second)
-			t = t + 1
-
-		}
-
-	}()
-
-	go func() {
-		for packet := range packetSource.Packets() {
-			if packet != nil {
-				if !sleepFlag {
-					process(packet)
-				} else {
-					continue
-				}
-			}
-		}
-	}()
-
-	select {
-	case <-chan_timeout:
-		os.Exit(0)
-
+		log.ReplaceLogger(logger)
 	}
 
 }
 
-func capture_by_ratio(packetSource *gopacket.PacketSource) {
+type HttpHandler struct {
+}
+
+func (HttpHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+
+
 	defer func() {
-		if re := recover(); re != nil {
+		if err := recover(); err != nil {
+
 		}
 	}()
-	rand.Seed(time.Now().UnixNano())
-	for packet := range packetSource.Packets() {
-		if rand.Float32() < ratioPercent {
-			process(packet)
-			packetCounter++
-		}
 
-	}
+	http.DefaultServeMux.ServeHTTP(res, req)
 }
 
 func main() {
 	flag.Parse()
-
-	// Open device
-	ports=get_listen_ports()
-	//fmt.Println(ports)
-	handle, err := pcap.OpenLive(
-		*device,
-		int32(*snapshot),
-		promiscuous,
-		pcap.BlockForever,
-	)
+	pcapHandle, err := NewPcapHandler()
 	if err != nil {
-		log.Fatal(err)
+		log.Error(err)
 	}
-	defer handle.Close()
-
-	localIp = GetPulicIP()
-
-	evenMap = NewCommonMap(0)
-
-	tk := time.NewTicker(time.Second)
-
-	go func(tk *time.Ticker) {
-		for _ = range tk.C {
-			//fmt.Println(packetCounter, *ratio)
-			if packetCounter > 10 {
-				*ratio = *ratio - 0.1
-			}
-			if packetCounter < 10 {
-				*ratio = *ratio + 0.1
-			}
-			if *ratio > 100 {
-				*ratio = 100
-			}
-			if *ratio < 0 {
-				*ratio = 0.1
-			}
-			packetCounter = 0
-			ratioPercent = float32(*ratio) / 100
-		}
-	}(tk)
-
-	tk2 := time.NewTicker(time.Second * time.Duration(30+rand.Intn(30)))
-	go func() {
-		for _ = range tk2.C {
-			for _, e := range evenMap.Get() {
-				if len(eventList.Events) < 100 {
-					eventList.Events = append(eventList.Events, e.(Event))
-				}
-			}
-			if len(eventList.Events) <= 0 {
-				return
-			}
-			evenMap.Clear()
-			json_event, err := json.Marshal(eventList)
-			eventList.Events = eventList.Events[0:0]
-			if *url != "" {
-				req := httplib.Post(*url)
-				req.Param("data", string(json_event))
-				req.String()
-			}
-			if err != nil {
-				errorLog.Printf("ERROR: can't marshal %s", json_event)
-			}
-			if !*quiet {
-				fmt.Println(string(json_event))
-			}
-
-		}
-
-	}()
-
-	// Set filter
-	err = handle.SetBPFFilter(*filter)
-	if err != nil {
-		fmt.Println(err)
-		log.Fatal(err)
-	}
-	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	if *ratio > 100 || *ratio < 0 {
-		log.Fatal("ratio must be between 0~100 ")
-		return
-	}
-	rand.Seed(time.Now().UnixNano())
-	_ = packetSource
+	pcapHandle.ScanLocalPort()
+	//pcapHandle.Capture()
 
 	go func() {
-		for{
-			capture_by_ratio(packetSource)
+		time.Sleep(time.Second * 1)
+		for {
+			pcapHandle.ReStart()
+			pcapHandle.Capture()
+			time.Sleep(time.Second * time.Duration(pcapHandle.capTime))
+			pcapHandle.Stop()
+			time.Sleep(time.Second * time.Duration(pcapHandle.sleepCapTime))
 		}
 	}()
 
-	select {
+	http.ListenAndServe(":8000",new(HttpHandler))
 
-	}
+	select {}
 
 }

@@ -118,7 +118,7 @@ func NewPcapHandler() (*PcapHandler, error) {
 	intervals := strings.Split(*capture_time, ",")
 	if len(intervals) == 2 {
 		capTime, err = strconv.Atoi(intervals[0])
-		sleepCapTime, err = strconv.Atoi(intervals[0])
+		sleepCapTime, err = strconv.Atoi(intervals[1])
 	}
 	util:=&goutil.Common{}
 	return &PcapHandler{
